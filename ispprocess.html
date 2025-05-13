@@ -1,0 +1,876 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D График Изопроцессов с Вводом Данных v4</title>
+    <style>
+        body { margin: 0; font-family: Arial, sans-serif; }
+        #container { width: 100vw; height: 60vh; border: 1px solid #ccc; }
+        #controls { padding: 10px; }
+        #inputForm { margin-top: 10px; }
+        #legend { padding: 10px; border-top: 1px solid #eee; margin-top: 10px;}
+        #projections { display: flex; justify-content: space-around; margin-top: 10px;}
+        canvas { border: 1px solid black; }
+        label { margin-right: 5px; min-width: 25px; display: inline-block; }
+        input[type=number] { margin-right: 10px; margin-bottom: 5px; width: 90px; padding: 2px;}
+        input[type=number]:disabled { background-color: #eee; color: #777; border-style: dashed;}
+        button { padding: 5px 10px; margin-right: 10px; cursor: pointer;}
+        .legend-item { display: inline-block; margin-right: 20px; }
+        .point-input-group { margin-bottom: 10px; border-left: 3px solid #eee; padding-left: 8px; background-color: #f9f9f9; padding-top: 5px; padding-bottom: 5px;}
+        .point-label { font-weight: bold; margin-bottom: 5px; display: block; }
+        .coord-input { display: inline-flex; align-items: center; margin-right: 15px; margin-bottom: 5px; }
+        .process-select { margin-top: 8px; }
+        #initialPlaneSelector { margin-bottom: 15px; padding-bottom: 10px; border-bottom: 1px solid #eee;}
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <div id="gasParams" style="padding-bottom: 10px; border-bottom: 1px solid #eee; margin-bottom:10px;">
+            <h4>Параметры газа:</h4>
+            <label for="gasMass">Масса газа (m, кг):</label>
+            <input type="number" id="gasMass" value="0.001" step="0.001" title="Масса газа в килограммах">
+            <br>
+            <label for="molarMass">Молярная масса (M, кг/моль):</label>
+            <input type="number" id="molarMass" value="0.029" step="0.001" title="Молярная масса в кг/моль (например, воздух ~0.029 кг/моль)">
+        </div>
+        <div id="initialPlaneSelector">
+            <label for="initialPlane">Выберите начальную плоскость (для справки):</label>
+            <select id="initialPlane">
+                <option value="PV">PV</option>
+                <option value="VT">VT</option>
+                <option value="PT">PT</option>
+            </select>
+        </div>
+        <hr style="display: none;" id="separatorLine">
+
+        <div id="inputForm"></div>
+        <div>
+                <button type="button" onclick="addPointPair()">Добавить точку</button>
+                <button type="button" onclick="updateGraphs()" style="margin-left: 20px;">Применить</button>
+                <button type="button" id="closeCycleBtn" onclick="closeCycle()" style="margin-left: 10px;">Замкнуть цикл</button>
+                <label for="closingProcessSelect" style="margin-left: 20px;">Процесс замыкания:</label>
+            <select id="closingProcessSelect">
+                    <option value="isobaric">Изобарный</option>
+                    <option value="isochoric">Изохорный</option>
+                    <option value="isothermal">Изотермический</option>
+                    <option value="other">Другой (Прямая)</option>
+            </select>
+                <button type="button" id="resetBtn" onclick="initializeForm()" title="Сбросить все точки" style="margin-left: 30px;">Сброс</button>
+        </div>
+    </div>
+    <div id="legend">
+        <span class="legend-item"><span style="color: #ff3333;">■</span> Изобарный</span>
+        <span class="legend-item"><span style="color: #33ff33;">■</span> Изохорный</span>
+        <span class="legend-item"><span style="color: #3333ff;">■</span> Изотермический</span>
+        <span class="legend-item"><span style="color: #888888;">■</span> Замыкающий/Другой</span>
+    </div>
+    <div id="container"></div>
+    <div id="projections">
+        <canvas id="pvCanvas" width="300" height="200"></canvas>
+        <canvas id="vtCanvas" width="300" height="200"></canvas>
+        <canvas id="ptCanvas" width="300" height="200"></canvas>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script>
+        const R_GAS_CONSTANT = 8.314;
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / (window.innerHeight * 0.6), 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight * 0.6);
+        document.getElementById('container').appendChild(renderer.domElement);
+
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+
+        camera.position.set(25, 20, 30);
+        controls.target.set(10, 5, 5);
+        controls.update();
+
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+        scene.add(ambientLight);
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        directionalLight.position.set(50, 50, 50);
+        scene.add(directionalLight);
+
+        const axesHelper = new THREE.AxesHelper(25);
+        scene.add(axesHelper);
+
+        function createLabel(text, position, color = 'black', size = 20) {
+            const canvas = document.createElement('canvas');
+            const context = canvas.getContext('2d');
+            context.font = `${size}px Arial`;
+            const textWidth = context.measureText(text).width;
+            canvas.width = textWidth + 20;
+            canvas.height = size + 10;
+            context.font = `${size}px Arial`;
+            context.fillStyle = color;
+            context.fillText(text, 10, size);
+            const texture = new THREE.CanvasTexture(canvas);
+            texture.needsUpdate = true;
+            const spriteMaterial = new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false });
+            const sprite = new THREE.Sprite(spriteMaterial);
+            sprite.position.copy(position);
+            sprite.scale.set(canvas.width / 32, canvas.height / 32, 1.0);
+            return sprite;
+        }
+
+        function addGridLabels() {
+                scene.children = scene.children.filter(child => !(child.type === 'Sprite'));
+                const gridSize = 25; const divisions = 5; const step = gridSize / divisions;
+                const approxMaxP = 200000; const approxMaxV = 0.002; const approxMaxT = 600;
+                const scaleP_label = 20 / approxMaxP; const scaleV_label = 20 / approxMaxV; const scaleT_label = 20 / approxMaxT;
+
+            for (let i = 0; i <= divisions; i++) {
+                 const pVal = (i * step / scaleP_label).toExponential(1);
+                 scene.add(createLabel(pVal, new THREE.Vector3(i * step, -0.5, -0.5), 'red', 14));
+                 const vVal = (i * step / scaleV_label).toExponential(1);
+                 scene.add(createLabel(vVal, new THREE.Vector3(-0.5, i * step, -0.5), 'green', 14));
+                 const tVal = (i * step / scaleT_label).toFixed(0);
+                 scene.add(createLabel(tVal, new THREE.Vector3(-0.5, -0.5, i * step), 'blue', 14));
+            }
+            scene.add(createLabel('P (Па)', new THREE.Vector3(gridSize + 1, 0, 0), 'red', 18));
+            scene.add(createLabel('V (м³)', new THREE.Vector3(0, gridSize + 1, 0), 'green', 18));
+            scene.add(createLabel('T (К)', new THREE.Vector3(0, 0, gridSize + 1), 'blue', 18));
+        }
+        addGridLabels();
+
+        const pvCtx = document.getElementById('pvCanvas').getContext('2d');
+        const vtCtx = document.getElementById('vtCanvas').getContext('2d');
+        const ptCtx = document.getElementById('ptCanvas').getContext('2d');
+
+
+        let pointsDataIds = [];
+        let pointCounter = 0;
+        let initialSelectedPlane = 'PV';
+
+
+        function initializeForm() {
+            const inputForm = document.getElementById('inputForm');
+            const planeSelector = document.getElementById('initialPlaneSelector');
+            const separator = document.getElementById('separatorLine');
+            inputForm.innerHTML = '<div id="pointsContainer"></div>';
+            pointsDataIds = [];
+            pointCounter = 0;
+            planeSelector.style.display = 'block';
+            separator.style.display = 'none';
+                scene.children = scene.children.filter(child => child instanceof THREE.AxesHelper || child instanceof THREE.Light || child.type === 'Sprite');
+                addGridLabels();
+                clear2DGraphs();
+            addPointPair();
+        }
+
+        function clear2DGraphs() {
+                pvCtx.clearRect(0, 0, pvCtx.canvas.width, pvCtx.canvas.height);
+                vtCtx.clearRect(0, 0, vtCtx.canvas.width, vtCtx.canvas.height);
+                ptCtx.clearRect(0, 0, ptCtx.canvas.width, ptCtx.canvas.height);
+        }
+
+        function addPointPair() {
+            const container = document.getElementById('pointsContainer');
+            const currentId = pointCounter++;
+            pointsDataIds.push(currentId);
+
+            const isFirstPoint = (currentId === 0);
+            const prevId = isFirstPoint ? -1 : pointsDataIds[pointsDataIds.length - 2];
+
+            if (isFirstPoint) {
+                    initialSelectedPlane = document.getElementById('initialPlane').value;
+                    document.getElementById('initialPlaneSelector').style.display = 'none';
+                    document.getElementById('separatorLine').style.display = 'block';
+            }
+
+            let defaultP = 100000, defaultV = 0.001, defaultT = 300;
+            if (!isFirstPoint) {
+                    const prevGroup = document.getElementById(`pointGroup${prevId}`);
+                    if (prevGroup) {
+                        defaultP = parseFloat(prevGroup.querySelector(`#P_${prevId}`).value) || defaultP;
+                        defaultV = parseFloat(prevGroup.querySelector(`#V_${prevId}`).value) || defaultV;
+                        defaultT = parseFloat(prevGroup.querySelector(`#T_${prevId}`).value) || defaultT;
+                    }
+            }
+
+            let pointHtml = `
+                <div class="point-input-group" id="pointGroup${currentId}">
+                    <span class="point-label">Точка ${currentId + 1}</span>
+                    <div class="coord-inputs">
+                        <span class="coord-input">
+                            <label for="P_${currentId}">P (Па):</label>
+                            <input type="number" id="P_${currentId}" value="" step="1000" title="Давление (Па)" onchange="updateInputAndDependent(${currentId})">
+                        </span>
+                        <span class="coord-input">
+                            <label for="V_${currentId}">V (м³):</label>
+                            <input type="number" id="V_${currentId}" value="" step="0.0001" style="width: 100px;" title="Объем (м³)" onchange="updateInputAndDependent(${currentId})">
+                        </span>
+                        <span class="coord-input">
+                            <label for="T_${currentId}">T (К):</label>
+                            <input type="number" id="T_${currentId}" value="" step="10" title="Температура (К)" onchange="updateInputAndDependent(${currentId})">
+                        </span>
+                    </div>
+                    <div class="process-select" id="processSelectDiv_${currentId}" style="display: none;"> <label for="process_${currentId}">Процесс ${currentId + 1} → ${currentId + 2}:</label>
+                            <select id="process_${currentId}" onchange="handleProcessChange(${currentId})">
+                            <option value="isobaric">Изобарный</option>
+                            <option value="isochoric">Изохорный</option>
+                            <option value="isothermal">Изотермический</option>
+                                <option value="other">Другой</option> </select>
+                    </div>
+                    <button type="button" onclick="removePoint(${currentId})" title="Удалить точку ${currentId+1}" style="padding: 1px 5px; font-size: 10px; margin-left: 10px; cursor:pointer; float: right;">×</button>
+                </div>
+            `;
+
+            container.insertAdjacentHTML('beforeend', pointHtml);
+
+if (!isFirstPoint) {
+    const processSelectPrev = document.getElementById(`process_${prevId}`);
+    if (processSelectPrev) {
+        setConstantBasedOnProcess(currentId, prevId, processSelectPrev.value);
+        calculateAndUpdatePointState(currentId);
+    }
+}
+            updateProcessSelectorsVisibility();
+        
+        }
+
+        function handleProcessChange(prevPointId) {
+            const currentPointId = pointsDataIds[pointsDataIds.indexOf(prevPointId) + 1];
+            if (currentPointId === undefined) return; 
+
+            const prevGroup = document.getElementById(`pointGroup${prevPointId}`);
+            const currentGroup = document.getElementById(`pointGroup${currentPointId}`);
+            const processSelect = document.getElementById(`process_${prevPointId}`);
+
+            if (!prevGroup || !currentGroup || !processSelect) return;
+
+            const processType = processSelect.value;
+
+            const prevPInput = prevGroup.querySelector(`#P_${prevPointId}`);
+            const prevVInput = prevGroup.querySelector(`#V_${prevPointId}`);
+            const prevTInput = prevGroup.querySelector(`#T_${prevPointId}`);
+
+            const currentPInput = currentGroup.querySelector(`#P_${currentPointId}`);
+            const currentVInput = currentGroup.querySelector(`#V_${currentPointId}`);
+            const currentTInput = currentGroup.querySelector(`#T_${currentPointId}`);
+
+
+            currentPInput.disabled = false;
+            currentVInput.disabled = false;
+            currentTInput.disabled = false;
+
+            if (processType === 'isobaric') {
+                currentPInput.value = prevPInput.value;
+                currentPInput.disabled = true;
+            } else if (processType === 'isochoric') {
+                currentVInput.value = prevVInput.value;
+                currentVInput.disabled = true;
+            } else if (processType === 'isothermal') {
+                currentTInput.value = prevTInput.value;
+                currentTInput.disabled = true;
+            }
+        }
+function getGasProperties() {
+    const m = parseFloat(document.getElementById('gasMass').value);
+    const M = parseFloat(document.getElementById('molarMass').value);
+    if (isNaN(m) || isNaN(M) || m <= 0 || M <= 0) {
+        alert("Пожалуйста, введите корректные значения массы и молярной массы газа (больше 0).");
+        return null;
+    }
+    return { m, M };
+}
+
+function attemptStateCalculation(pointId) {
+    const gasProps = getGasProperties();
+    if (!gasProps) return false;
+    const { m, M } = gasProps;
+
+    const group = document.getElementById(`pointGroup${pointId}`);
+    if (!group) return false;
+
+    const pInput = group.querySelector(`#P_${pointId}`);
+    const vInput = group.querySelector(`#V_${pointId}`);
+    const tInput = group.querySelector(`#T_${pointId}`);
+
+    let P_str = pInput.value;
+    let V_str = vInput.value;
+    let T_str = tInput.value;
+
+    let P = parseFloat(P_str);
+    let V = parseFloat(V_str);
+    let T = parseFloat(T_str);
+
+    let calculatedSomething = false;
+
+    const knownValues = {
+        P: (P_str !== "" && !isNaN(P) && P > 0),
+        V: (V_str !== "" && !isNaN(V) && V > 0),
+        T: (T_str !== "" && !isNaN(T) && T > 0)
+    };
+    const knownCount = (knownValues.P ? 1 : 0) + (knownValues.V ? 1 : 0) + (knownValues.T ? 1 : 0);
+
+    if (knownCount === 2) { // Если ровно два параметра известны, рассчитываем третий
+        if (knownValues.V && knownValues.T && !knownValues.P && !pInput.disabled) { // P = mRT/VM
+            P = (m * R_GAS_CONSTANT * T) / (V * M);
+            if (!isNaN(P) && P > 0) {
+                pInput.value = P.toFixed(0);
+                calculatedSomething = true;
+            }
+        } else if (knownValues.P && knownValues.T && !knownValues.V && !vInput.disabled) { // V = mRT/PM
+            V = (m * R_GAS_CONSTANT * T) / (P * M);
+            if (!isNaN(V) && V > 0) {
+                vInput.value = V.toExponential(3);
+                calculatedSomething = true;
+            }
+        } else if (knownValues.P && knownValues.V && !knownValues.T && !tInput.disabled) { // T = PVM/mR
+            T = (P * V * M) / (m * R_GAS_CONSTANT);
+            if (!isNaN(T) && T > 0) {
+                tInput.value = T.toFixed(2);
+                calculatedSomething = true;
+            }
+        }
+    }
+    return calculatedSomething;
+}
+
+function updateInputAndDependent(changedPointId) {
+    const calculationDone = attemptStateCalculation(changedPointId);
+
+    const currentIndex = pointsDataIds.indexOf(changedPointId);
+    if (currentIndex < pointsDataIds.length - 1) {
+        const nextPointId = pointsDataIds[currentIndex + 1];
+        const processSelect = document.getElementById(`process_${changedPointId}`);
+
+        if (processSelect) {
+            const processTypeToNext = processSelect.value;
+            const constantSet = setConstantForNextPoint(nextPointId, changedPointId, processTypeToNext);
+            if (constantSet) {
+                attemptStateCalculation(nextPointId);
+            }
+        }
+    }
+}
+
+function setConstantForNextPoint(targetPointId, prevPointId, processType) {
+    const prevGroup = document.getElementById(`pointGroup${prevPointId}`);
+    const targetGroup = document.getElementById(`pointGroup${targetPointId}`);
+    if (!prevGroup || !targetGroup) return false;
+
+    const pInputTarget = targetGroup.querySelector(`#P_${targetPointId}`);
+    const vInputTarget = targetGroup.querySelector(`#V_${targetPointId}`);
+    const tInputTarget = targetGroup.querySelector(`#T_${targetPointId}`);
+
+    const prevPInput = prevGroup.querySelector(`#P_${prevPointId}`);
+    const prevVInput = prevGroup.querySelector(`#V_${prevPointId}`);
+    const prevTInput = prevGroup.querySelector(`#T_${prevPointId}`);
+
+    pInputTarget.disabled = false;
+    vInputTarget.disabled = false;
+    tInputTarget.disabled = false;
+
+    let constantSuccessfullySet = false;
+
+    if (processType === 'isobaric') {
+        const prevPVal = prevPInput.value;
+        if (prevPVal !== "" && !isNaN(parseFloat(prevPVal))) {
+            pInputTarget.value = prevPVal;
+            pInputTarget.disabled = true;
+            constantSuccessfullySet = true;
+        } else {
+            pInputTarget.value = "";
+        }
+    } else if (processType === 'isochoric') {
+        const prevVVal = prevVInput.value;
+        if (prevVVal !== "" && !isNaN(parseFloat(prevVVal))) {
+            vInputTarget.value = prevVVal;
+            vInputTarget.disabled = true;
+            constantSuccessfullySet = true;
+        } else {
+            vInputTarget.value = "";
+        }
+    } else if (processType === 'isothermal') {
+        const prevTVal = prevTInput.value;
+        if (prevTVal !== "" && !isNaN(parseFloat(prevTVal))) {
+            tInputTarget.value = prevTVal;
+            tInputTarget.disabled = true;
+            constantSuccessfullySet = true;
+        } else {
+            tInputTarget.value = "";
+        }
+    } else if (processType === 'other') {
+        constantSuccessfullySet = true;
+    }
+    return constantSuccessfullySet;
+}
+
+function calculateAndUpdatePointState(targetPointId) {
+    const gasProps = getGasProperties();
+    if (!gasProps) return;
+    const { m, M } = gasProps;
+
+    const targetGroup = document.getElementById(`pointGroup${targetPointId}`);
+    if (!targetGroup) return;
+
+    const pInput = targetGroup.querySelector(`#P_${targetPointId}`);
+    const vInput = targetGroup.querySelector(`#V_${targetPointId}`);
+    const tInput = targetGroup.querySelector(`#T_${targetPointId}`);
+
+    let P_str = pInput.value;
+    let V_str = vInput.value;
+    let T_str = tInput.value;
+
+    let P = parseFloat(P_str);
+    let V = parseFloat(V_str);
+    let T = parseFloat(T_str);
+
+    let pCalculated = false, vCalculated = false, tCalculated = false;
+
+    const targetPointIndex = pointsDataIds.indexOf(targetPointId);
+    if (targetPointIndex > 0) {
+        const prevPointId = pointsDataIds[targetPointIndex - 1];
+        const processSelect = document.getElementById(`process_${prevPointId}`);
+        if (processSelect) {
+            const incomingProcessType = processSelect.value;
+            const prevPVal = parseFloat(document.getElementById(`P_${prevPointId}`).value);
+            const prevVVal = parseFloat(document.getElementById(`V_${prevPointId}`).value);
+            const prevTVal = parseFloat(document.getElementById(`T_${prevPointId}`).value);
+
+            pInput.disabled = false; vInput.disabled = false; tInput.disabled = false;
+
+            if (incomingProcessType === 'isobaric' && !isNaN(prevPVal)) {
+                P = prevPVal; P_str = P.toFixed(0); pInput.value = P_str; pInput.disabled = true;
+            } else if (incomingProcessType === 'isochoric' && !isNaN(prevVVal)) {
+                V = prevVVal; V_str = V.toExponential(3); vInput.value = V_str; vInput.disabled = true;
+            } else if (incomingProcessType === 'isothermal' && !isNaN(prevTVal)) {
+                T = prevTVal; T_str = T.toFixed(2); tInput.value = T_str; tInput.disabled = true;
+            }
+        }
+    } else {
+        pInput.disabled = false; vInput.disabled = false; tInput.disabled = false;
+    }
+
+
+    const knownParamsCount = (P_str !== "" && !isNaN(P) ? 1 : 0) +
+                                (V_str !== "" && !isNaN(V) ? 1 : 0) +
+                                (T_str !== "" && !isNaN(T) ? 1 : 0);
+
+    if (knownParamsCount === 2) {
+        if ((V_str !== "" && !isNaN(V)) && (T_str !== "" && !isNaN(T)) && (P_str === "" || isNaN(P)) && !pInput.disabled) {
+            if (V > 0 && T > 0 && m > 0 && M > 0) {
+                P = (m * R_GAS_CONSTANT * T) / (V * M);
+                pInput.value = P.toFixed(0);
+                pCalculated = true;
+            }
+        } else if ((P_str !== "" && !isNaN(P)) && (T_str !== "" && !isNaN(T)) && (V_str === "" || isNaN(V)) && !vInput.disabled) {
+            if (P > 0 && T > 0 && m > 0 && M > 0) {
+                V = (m * R_GAS_CONSTANT * T) / (P * M);
+                vInput.value = V.toExponential(3);
+                vCalculated = true;
+            }
+        } else if ((P_str !== "" && !isNaN(P)) && (V_str !== "" && !isNaN(V)) && (T_str === "" || isNaN(T)) && !tInput.disabled) {
+            if (P > 0 && V > 0 && m > 0 && M > 0) {
+                T = (P * V * M) / (m * R_GAS_CONSTANT);
+                tInput.value = T.toFixed(2);
+                tCalculated = true;
+            }
+        }
+    }
+
+        if (targetPointIndex === 0 && (pCalculated || vCalculated || tCalculated)) {
+            if (pointsDataIds.length > 1) {
+                const nextPointId = pointsDataIds[1];
+                const processSelect = document.getElementById(`process_${targetPointId}`);
+                if (processSelect) {
+                    setConstantBasedOnProcess(nextPointId, targetPointId, processSelect.value);
+                    calculateAndUpdatePointState(nextPointId);
+                }
+            }
+        }
+}
+function setConstantBasedOnProcess(targetPointId, prevPointId, processType) {
+    const prevGroup = document.getElementById(`pointGroup${prevPointId}`);
+    const targetGroup = document.getElementById(`pointGroup${targetPointId}`);
+    if (!prevGroup || !targetGroup) return;
+
+    const pInputTarget = targetGroup.querySelector(`#P_${targetPointId}`);
+    const vInputTarget = targetGroup.querySelector(`#V_${targetPointId}`);
+    const tInputTarget = targetGroup.querySelector(`#T_${targetPointId}`);
+
+    const prevPValStr = prevGroup.querySelector(`#P_${prevPointId}`).value;
+    const prevVValStr = prevGroup.querySelector(`#V_${prevPointId}`).value;
+    const prevTValStr = prevGroup.querySelector(`#T_${prevPointId}`).value;
+
+    pInputTarget.disabled = false;
+    vInputTarget.disabled = false;
+    tInputTarget.disabled = false;
+
+    if (processType === 'isobaric') {
+        if (prevPValStr !== "") {
+            pInputTarget.value = prevPValStr;
+            pInputTarget.disabled = true;
+        }
+    } else if (processType === 'isochoric') {
+        if (prevVValStr !== "") {
+            vInputTarget.value = prevVValStr;
+            vInputTarget.disabled = true;
+        }
+    } else if (processType === 'isothermal') {
+        if (prevTValStr !== "") {
+            tInputTarget.value = prevTValStr;
+            tInputTarget.disabled = true;
+        }
+    }
+
+}
+
+function handleProcessChange(prevPointId) {
+    const currentPointId = pointsDataIds[pointsDataIds.indexOf(prevPointId) + 1];
+    if (currentPointId === undefined) return;
+
+    const processSelect = document.getElementById(`process_${prevPointId}`);
+    if (!processSelect) return;
+    const processType = processSelect.value;
+
+    const constantSet = setConstantForNextPoint(currentPointId, prevPointId, processType);
+
+    if (constantSet) {
+        attemptStateCalculation(currentPointId);
+    }
+}
+
+
+
+
+
+        function updateProcessSelectorsVisibility() {
+            pointsDataIds.forEach((pId, index) => {
+                const group = document.getElementById(`pointGroup${pId}`);
+                if (!group) return;
+                const processDiv = group.querySelector(`#processSelectDiv_${pId}`);
+                if (processDiv) {
+                    processDiv.style.display = (index < pointsDataIds.length - 1) ? 'block' : 'none';
+                }
+            });
+        }
+
+        function removePoint(idToRemove) {
+            const groupToRemove = document.getElementById(`pointGroup${idToRemove}`);
+            if (!groupToRemove) return;
+
+            const indexToRemove = pointsDataIds.indexOf(idToRemove);
+            const prevPointId = (indexToRemove > 0) ? pointsDataIds[indexToRemove - 1] : -1;
+
+            groupToRemove.remove();
+            pointsDataIds = pointsDataIds.filter(pid => pid !== idToRemove);
+
+                if(prevPointId !== -1 && indexToRemove < pointsDataIds.length) {
+                    handleProcessChange(prevPointId);
+                }
+
+
+            updateProcessSelectorsVisibility();
+
+
+            if (pointsDataIds.length === 0) {
+                    initializeForm();
+            }
+                updateGraphs();
+        }
+
+        function generateProcessPoints(point1, point2, processType) {
+            const points = [];
+            const numSteps = 50;
+
+            if (!point1 || !point2 ) {
+                console.error("Invalid input for generateProcessPoints", point1, point2, processType);
+                return [{P:0,V:0,T:0}];
+            }
+                points.push({ P: point1.P, V: point1.V, T: point1.T });
+
+            if (processType === 'isobaric') {
+                const P = point1.P;
+                for (let i = 1; i <= numSteps; i++) {
+                    const t = i / numSteps;
+                    const V = point1.V + t * (point2.V - point1.V);
+                    const T = point1.T + t * (point2.T - point1.T);
+                    points.push({ P, V, T });
+                }
+            } else if (processType === 'isochoric') {
+                const V = point1.V;
+                for (let i = 1; i <= numSteps; i++) {
+                    const t = i / numSteps;
+                    const P = point1.P + t * (point2.P - point1.P);
+                    const T = point1.T + t * (point2.T - point1.T);
+                    points.push({ P, V, T });
+                }
+            } else if (processType === 'isothermal') {
+                const T = point1.T;
+                const k = point1.P * point1.V;
+                const V1 = point1.V;
+                const V2 = point2.V;
+                    if (Math.abs(V2 - V1) < 1e-9 || V1 <= 0 || V2 <= 0 || k <= 0) {
+                    for (let i = 1; i <= numSteps; i++) {
+                            const t = i / numSteps;
+                         const V = point1.V + t * (point2.V - point1.V);
+                         const P = point1.P + t * (point2.P - point1.P);
+                            points.push({ P, V, T });
+                    }
+                    } else {
+                    const dV = (V2 - V1) / numSteps;
+                    for (let i = 1; i <= numSteps; i++) {
+                        const V = V1 + i * dV;
+                        if (V <= 0) continue;
+                        const P = k / V;
+                        points.push({ P, V, T });
+                    }
+                    }
+            } else {
+                    for (let i = 1; i <= numSteps; i++) {
+                    const t = i / numSteps;
+                    const P = point1.P + t * (point2.P - point1.P);
+                    const V = point1.V + t * (point2.V - point1.V);
+                    const T = point1.T + t * (point2.T - point1.T);
+                    points.push({ P, V, T });
+                }
+            }
+                if (points.length > 0) {
+                    points[points.length - 1] = { P: point2.P, V: point2.V, T: point2.T };
+                } else if(point2) {
+                    points.push({ P: point2.P, V: point2.V, T: point2.T });
+                }
+            return points;
+        }
+
+
+        function getColorForProcess(processType) {
+            switch (processType) {
+                case 'isobaric': return '#ff3333';
+                case 'isochoric': return '#33ff33';
+                case 'isothermal': return '#3333ff';
+                case 'closing': return '#888888';
+                case 'other': return '#ffa500';
+                default: return '#000000';
+            }
+        }
+
+            function getDynamicScalesAndMaxValues(allPoints) {
+
+                let maxP = 1000, maxV = 1e-4, maxT = 10;
+                if (allPoints.length > 0) {
+                  maxP = Math.max(maxP, ...allPoints.map(p => p.P || 0)) * 1.1;
+                  maxV = Math.max(maxV, ...allPoints.map(p => p.V || 0)) * 1.1;
+                  maxT = Math.max(maxT, ...allPoints.map(p => p.T || 0)) * 1.1;
+                }
+                maxP = Math.max(maxP, 1); maxV = Math.max(maxV, 1e-6); maxT = Math.max(maxT, 1);
+                return { maxP, maxV, maxT };
+            }
+
+        function drawAxesAndLabels2D(ctx, xKey, yKey, labelX, labelY, scaleInfo) {
+                ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+                ctx.fillStyle = 'black'; ctx.strokeStyle = 'black'; ctx.lineWidth = 1;
+                ctx.beginPath();
+             ctx.moveTo(50, ctx.canvas.height - 50); ctx.lineTo(ctx.canvas.width - 20, ctx.canvas.height - 50); // X
+             ctx.moveTo(50, ctx.canvas.height - 50); ctx.lineTo(50, 20); // Y
+                ctx.stroke();
+                const xMaxVal = (xKey === 'P' ? scaleInfo.maxP : xKey === 'V' ? scaleInfo.maxV : scaleInfo.maxT);
+                const yMaxVal = (yKey === 'P' ? scaleInfo.maxP : yKey === 'V' ? scaleInfo.maxV : scaleInfo.maxT);
+                const numTicks = 4;
+                const xTickSpacing = (ctx.canvas.width - 70) / numTicks;
+                const yTickSpacing = (ctx.canvas.height - 70) / numTicks;
+                ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+                    for (let i = 0; i <= numTicks; i++) { const xValue = (i * xMaxVal / numTicks).toPrecision(2); ctx.fillText(xValue, 50 + i * xTickSpacing, ctx.canvas.height - 45); }
+            ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+                     for (let i = 0; i <= numTicks; i++) { const yValue = ((numTicks - i) * yMaxVal / numTicks).toPrecision(2); ctx.fillText(yValue, 45, 20 + i * yTickSpacing); }
+            ctx.textAlign = 'center';
+            ctx.fillText(`${labelX} (${labelX === 'P' ? 'Па' : labelX === 'V' ? 'м³' : 'К'})`, 50 + (ctx.canvas.width - 70) / 2, ctx.canvas.height - 25);
+            ctx.save(); ctx.translate(20, ctx.canvas.height / 2); ctx.rotate(-Math.PI / 2); ctx.textAlign = 'center';
+            ctx.fillText(`${labelY} (${labelY === 'P' ? 'Па' : labelY === 'V' ? 'м³' : 'К'})`, 0, 0); ctx.restore();
+        }
+
+        function drawSingleProcessOn2D(ctx, points, xKey, yKey, color, processName, scaleInfo) {
+
+                if (!points || points.length < 2) return;
+            const graphWidth = ctx.canvas.width - 70; const graphHeight = ctx.canvas.height - 70;
+            const originX = 50; const originY = ctx.canvas.height - 50;
+            const xMaxVal = (xKey === 'P' ? scaleInfo.maxP : xKey === 'V' ? scaleInfo.maxV : scaleInfo.maxT);
+            const yMaxVal = (yKey === 'P' ? scaleInfo.maxP : yKey === 'V' ? scaleInfo.maxV : scaleInfo.maxT);
+            const scaleX = graphWidth / xMaxVal; const scaleY = graphHeight / yMaxVal;
+            ctx.beginPath(); let firstPointDrawn = false;
+            points.forEach((pt) => {
+                    if (isNaN(pt[xKey]) || isNaN(pt[yKey]) || pt[xKey] < 0 || pt[xKey] > xMaxVal || pt[yKey] < 0 || pt[yKey] > yMaxVal) return;
+                 const x = originX + pt[xKey] * scaleX; const y = originY - pt[yKey] * scaleY;
+                    if (!firstPointDrawn) { ctx.moveTo(x, y); firstPointDrawn = true; } else { ctx.lineTo(x, y); }
+                });
+                ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke();
+            const lastValidPoint = points[points.length - 1];
+                    if (lastValidPoint && !isNaN(lastValidPoint[xKey]) && !isNaN(lastValidPoint[yKey]) && lastValidPoint[xKey] >= 0 && lastValidPoint[xKey] <= xMaxVal && lastValidPoint[yKey] >= 0 && lastValidPoint[yKey] <= yMaxVal) {
+                 const x = originX + lastValidPoint[xKey] * scaleX + 5; const y = originY - lastValidPoint[yKey] * scaleY;
+                    const textX = Math.max(originX + 5, Math.min(ctx.canvas.width - 30 - ctx.measureText(processName).width, x));
+                    const textY = Math.max(30, Math.min(ctx.canvas.height - 55, y));
+                    ctx.fillStyle = color; ctx.font = 'bold 11px Arial'; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom'; ctx.fillText(processName, textX, textY);
+                }
+        }
+
+        function updateGraphs(isClosingCycle = false, closingSegment = null) {
+            scene.children = scene.children.filter(child =>
+                child instanceof THREE.AxesHelper ||
+                child instanceof THREE.Light ||
+                (child.type === 'Sprite' && !child.userData.isProcessLabel)
+            );
+        
+            const points = pointsDataIds.map(pId => {
+                const group = document.getElementById(`pointGroup${pId}`);
+                if (!group) return null;
+                return {
+                    id: pId,
+                    P: parseFloat(group.querySelector(`#P_${pId}`).value) || 0,
+                    V: parseFloat(group.querySelector(`#V_${pId}`).value) || 0,
+                    T: parseFloat(group.querySelector(`#T_${pId}`).value) || 0,
+                    process: group.querySelector(`#process_${pId}`)?.value || 'other'
+                };
+            }).filter(p => p !== null);
+        
+            if (points.length === 0) {
+                clear2DGraphs();
+                const defaultScaleInfo = { maxP: 200000, maxV: 0.002, maxT: 600 };
+                drawAxesAndLabels2D(pvCtx, 'V', 'P', 'V', 'P', defaultScaleInfo);
+                drawAxesAndLabels2D(vtCtx, 'V', 'T', 'V', 'T', defaultScaleInfo);
+                drawAxesAndLabels2D(ptCtx, 'T', 'P', 'T', 'P', defaultScaleInfo);
+                return;
+            }
+            if (points.length === 1 && !isClosingCycle) {
+                const scaleInfo2D = getDynamicScalesAndMaxValues(points);
+                drawAxesAndLabels2D(pvCtx, 'V', 'P', 'V', 'P', scaleInfo2D);
+                drawAxesAndLabels2D(vtCtx, 'V', 'T', 'V', 'T', scaleInfo2D);
+                drawAxesAndLabels2D(ptCtx, 'T', 'P', 'T', 'P', scaleInfo2D);
+                return;
+            }
+        
+        
+            let allProcessSegmentsPoints = [];
+            for (let i = 0; i < points.length - 1; i++) {
+                const segmentPoints = generateProcessPoints(points[i], points[i+1], points[i].process);
+                allProcessSegmentsPoints = allProcessSegmentsPoints.concat(segmentPoints);
+            }
+            if (isClosingCycle && closingSegment) {
+                const closingPointsRaw = generateProcessPoints(closingSegment.point1, closingSegment.point2, closingSegment.processType);
+                allProcessSegmentsPoints = allProcessSegmentsPoints.concat(closingPointsRaw);
+            }
+            if (allProcessSegmentsPoints.length === 0 && points.length > 0) {
+                allProcessSegmentsPoints = points;
+            }
+        
+        
+            const scaleInfoGlobal = getDynamicScalesAndMaxValues(allProcessSegmentsPoints.length > 0 ? allProcessSegmentsPoints : points); // Используем points если нет сегментов (1 точка)
+        
+            const scaleP_3D = 20 / (scaleInfoGlobal.maxP || 1);
+            const scaleV_3D = 20 / (scaleInfoGlobal.maxV || 1e-6);
+            const scaleT_3D = 20 / (scaleInfoGlobal.maxT || 1);
+        
+            drawAxesAndLabels2D(pvCtx, 'V', 'P', 'V', 'P', scaleInfoGlobal);
+            drawAxesAndLabels2D(vtCtx, 'V', 'T', 'V', 'T', scaleInfoGlobal);
+            drawAxesAndLabels2D(ptCtx, 'T', 'P', 'T', 'P', scaleInfoGlobal);
+        
+        
+            for (let i = 0; i < points.length - 1; i++) {
+                const point1 = points[i];
+                const point2 = points[i + 1];
+                const processType = point1.process;
+        
+                if (!processType) continue;
+        
+                const processPoints = generateProcessPoints(point1, point2, processType);
+                if (processPoints.length < 2) continue;
+        
+                const geometry = new THREE.BufferGeometry().setFromPoints(
+                    processPoints.map(p => new THREE.Vector3(p.P * scaleP_3D, p.V * scaleV_3D, p.T * scaleT_3D))
+                );
+                const material = new THREE.LineBasicMaterial({ color: getColorForProcess(processType), linewidth: 3 });
+                const curve = new THREE.Line(geometry, material);
+                scene.add(curve);
+        
+                const midPointIndex = Math.floor(processPoints.length / 2);
+                const midPoint = processPoints[midPointIndex];
+                const midPointVec = new THREE.Vector3(midPoint.P * scaleP_3D, midPoint.V * scaleV_3D, midPoint.T * scaleT_3D);
+                const labelText = (processType === 'other') ? '' : `${processType.substring(0,3)}`;
+                if(labelText) {
+                    const label = createLabel(labelText, midPointVec.add(new THREE.Vector3(0.2, 0.2, 0.2)), getColorForProcess(processType), 16);
+                    label.userData.isProcessLabel = true;
+                    scene.add(label);
+                }
+        
+                if (processType !== 'other') {
+                    const color = getColorForProcess(processType);
+                    const name = processType;
+                    drawSingleProcessOn2D(pvCtx, processPoints, 'V', 'P', color, name, scaleInfoGlobal);
+                    drawSingleProcessOn2D(vtCtx, processPoints, 'V', 'T', color, name, scaleInfoGlobal);
+                    drawSingleProcessOn2D(ptCtx, processPoints, 'T', 'P', color, name, scaleInfoGlobal);
+                }
+            }
+        
+            if (isClosingCycle && closingSegment) {
+                const closingProcessType = closingSegment.processType;
+                const closingPoints = generateProcessPoints(closingSegment.point1, closingSegment.point2, closingProcessType);
+        
+                if (closingPoints.length >= 2) {
+                    const geometry = new THREE.BufferGeometry().setFromPoints(
+                        closingPoints.map(p => new THREE.Vector3(p.P * scaleP_3D, p.V * scaleV_3D, p.T * scaleT_3D))
+                    );
+                    const material = new THREE.LineBasicMaterial({ color: getColorForProcess(closingProcessType), linewidth: 3 });
+                    const curve = new THREE.Line(geometry, material);
+                    scene.add(curve);
+        
+                    const midPointIndex = Math.floor(closingPoints.length / 2);
+                    const midPoint = closingPoints[midPointIndex];
+                    const midPointVec = new THREE.Vector3(midPoint.P * scaleP_3D, midPoint.V * scaleV_3D, midPoint.T * scaleT_3D);
+                    const labelText = (closingProcessType === 'closing' || closingProcessType === 'other') ? 'Close' : `${closingProcessType.substring(0,3)}`;
+                    const label = createLabel(labelText, midPointVec.add(new THREE.Vector3(0.2, 0.2, 0.2)), getColorForProcess(closingProcessType), 16 );
+                    label.userData.isProcessLabel = true;
+                    scene.add(label);
+        
+                    const color = getColorForProcess(closingProcessType);
+                    // const name = `Close: ${closingProcessType}`;
+                    const name = labelText;
+                    drawSingleProcessOn2D(pvCtx, closingPoints, 'V', 'P', color, name, scaleInfoGlobal);
+                    drawSingleProcessOn2D(vtCtx, closingPoints, 'V', 'T', color, name, scaleInfoGlobal);
+                    drawSingleProcessOn2D(ptCtx, closingPoints, 'T', 'P', color, name, scaleInfoGlobal);
+                }
+            }
+        }
+
+            function closeCycle() {
+
+                const points = pointsDataIds.map(pId => { const group = document.getElementById(`pointGroup${pId}`); if (!group) return null; return { id: pId, P: parseFloat(group.querySelector(`#P_${pId}`).value) || 0, V: parseFloat(group.querySelector(`#V_${pId}`).value) || 0, T: parseFloat(group.querySelector(`#T_${pId}`).value) || 0, process: group.querySelector(`#process_${pId}`)?.value || 'other' }; }).filter(p => p !== null);
+                if (points.length < 2) { alert("Нужно как минимум две точки для замыкания цикла."); return; }
+                const lastPoint = points[points.length - 1]; const firstPoint = points[0];
+                if (Math.abs(lastPoint.P - firstPoint.P) < 1e-6 && Math.abs(lastPoint.V - firstPoint.V) < 1e-6 && Math.abs(lastPoint.T - firstPoint.T) < 1e-6) { alert("Последняя и первая точки уже совпадают."); return; }
+                const closingProcessSelect = document.getElementById('closingProcessSelect');
+                let closingProcessType = closingProcessSelect.value;
+                
+                if (closingProcessType === 'other') {
+                    closingProcessType = 'closing';
+                    console.log("Используется прямая линия для замыкания.");
+                }
+                const closingSegmentData = { point1: lastPoint, point2: firstPoint, processType: closingProcessType };
+                updateGraphs(true, closingSegmentData);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / (window.innerHeight * 0.6);
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight * 0.6);
+            updateGraphs();
+        });
+
+        initializeForm();
+        animate();
+
+    </script>
+</body>
+</html>
